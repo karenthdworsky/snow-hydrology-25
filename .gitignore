@@ -1,0 +1,9 @@
+.Rhistory
+.RData
+.Rproj.user/
+*_cache/
+*_files/
+*.Rproj
+
+# Large data files
+data/ASOS_ST.txt

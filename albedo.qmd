@@ -1,0 +1,232 @@
+---
+title: "Albedo: Surface Albedo Simulation and Analysis"
+author: "Karen Dworsky"
+date: "2025-11-06"
+format: html
+execute:
+  cache: true
+---
+
+## Setup
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+
+ASOS <- read.csv("data/ASOS2.txt", header = TRUE, stringsAsFactors = FALSE)
+
+ASOS <- ASOS %>%
+  mutate(
+    datetime   = as.POSIXct(valid, format = "%Y-%m-%d %H:%M", tz = "UTC"),
+    p01i       = as.numeric(ifelse(p01i == "M" | p01i == "" | is.na(p01i), NA, p01i)),
+    tmpf       = as.numeric(ifelse(tmpf == "M" | tmpf == "" | is.na(tmpf), NA, tmpf)),
+    sknt       = as.numeric(ifelse(sknt == "M" | sknt == "" | is.na(sknt), NA, sknt)),
+    temp_c     = (tmpf - 32) * 5/9,
+    p01m       = p01i * 25.4,
+    wind_ms    = sknt * 0.514444
+  ) %>%
+  arrange(datetime)
+```
+
+## 1. Albedo Simulation
+
+Snow albedo decays exponentially between snowfall events. Fresh snowfall resets albedo to the
+maximum value; the decay rate is faster during melt conditions (T > 0°C).
+
+```{r}
+alpha_fresh        <- 0.84
+alpha_decay_no_melt <- 0.70
+alpha_decay_melt   <- 0.50
+alpha_soil         <- 0.20
+k_no_melt          <- 0.01
+k_melt             <- 0.05
+
+asos_data <- ASOS %>%
+  mutate(
+    snowfall = !is.na(p01i) & p01i > 0 & !is.na(tmpf) & tmpf <= 35,
+    albedo   = NA_real_,
+    snow_present = FALSE
+  )
+
+asos_data$albedo[1]      <- alpha_soil
+asos_data$snow_present[1] <- FALSE
+
+for (i in 2:nrow(asos_data)) {
+  if (isTRUE(asos_data$snowfall[i])) {
+    asos_data$albedo[i]      <- alpha_fresh
+    asos_data$snow_present[i] <- TRUE
+  } else if (isTRUE(asos_data$snow_present[i - 1])) {
+    asos_data$snow_present[i] <- TRUE
+    time_diff <- as.numeric(difftime(asos_data$datetime[i],
+                                     asos_data$datetime[i - 1], units = "hours"))
+    is_melting <- !is.na(asos_data$tmpf[i]) && asos_data$tmpf[i] > 32
+    if (is_melting) {
+      k         <- k_melt
+      alpha_min <- alpha_decay_melt
+    } else {
+      k         <- k_no_melt
+      alpha_min <- alpha_decay_no_melt
+    }
+    alpha_prev <- asos_data$albedo[i - 1]
+    asos_data$albedo[i] <- alpha_min + (alpha_prev - alpha_min) * exp(-k * time_diff)
+
+    if (!is.na(asos_data$tmpf[i]) && asos_data$tmpf[i] > 40) {
+      asos_data$snow_present[i] <- FALSE
+      asos_data$albedo[i]       <- alpha_soil
+    }
+  } else {
+    asos_data$albedo[i]      <- alpha_soil
+    asos_data$snow_present[i] <- FALSE
+  }
+}
+
+ggplot(asos_data, aes(x = datetime, y = albedo)) +
+  geom_line(color = "#2166ac", linewidth = 0.5) +
+  geom_point(data = filter(asos_data, snowfall),
+             aes(x = datetime, y = albedo),
+             color = "red", size = 2, shape = 17) +
+  geom_hline(yintercept = alpha_fresh, linetype = "dashed", color = "darkgreen", alpha = 0.5) +
+  geom_hline(yintercept = alpha_decay_no_melt, linetype = "dashed", color = "orange", alpha = 0.5) +
+  geom_hline(yintercept = alpha_decay_melt, linetype = "dashed", color = "red", alpha = 0.5) +
+  geom_hline(yintercept = alpha_soil, linetype = "dashed", color = "brown", alpha = 0.5) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.1)) +
+  labs(title = "Hourly Albedo Estimation — Telluride ASOS (WY2024)",
+       subtitle = "Red triangles = snowfall events",
+       x = "Date", y = "Albedo",
+       caption = paste("Fresh snow α = 0.84 | No-melt decay min α = 0.70",
+                       "| Melt decay min α = 0.50 | Soil α = 0.20")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5))
+
+cat("Mean albedo:", round(mean(asos_data$albedo, na.rm = TRUE), 3), "\n")
+cat("Number of snowfall events detected:", sum(asos_data$snowfall, na.rm = TRUE), "\n")
+cat("% of time with snow cover:",
+    round(100 * sum(asos_data$snow_present) / nrow(asos_data), 1), "%\n")
+```
+
+## 2. Albedo and Temperature Relationship
+
+```{r}
+plot_data <- asos_data %>% mutate(temp_c = (tmpf - 32) * 5/9)
+
+ggplot(plot_data, aes(x = datetime)) +
+  geom_line(aes(y = albedo, color = "Albedo"), linewidth = 0.7) +
+  geom_line(aes(y = temp_c / 50 + 0.5, color = "Temperature"),
+            linewidth = 0.5, alpha = 0.7) +
+  scale_y_continuous(
+    name = "Albedo",
+    sec.axis = sec_axis(~ (. - 0.5) * 50, name = "Temperature (°C)")
+  ) +
+  scale_color_manual(values = c("Albedo" = "#2166ac", "Temperature" = "#d73027")) +
+  labs(title = "Albedo and Temperature — Telluride ASOS (WY2024)",
+       x = "Date", color = "") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+## 3. Fresh Snow Density — Hedstrom-Pomeroy Equation
+
+The Hedstrom-Pomeroy (1998) equation relates fresh snow density to air temperature:
+ρ = 67.92 + 51.25 × exp(T / 2.59)
+
+```{r}
+calc_fresh_snow_density <- function(temp_c) {
+  density <- 67.92 + 51.25 * exp(temp_c / 2.59)
+  pmax(50, pmin(200, density))
+}
+
+snow_events <- asos_data %>%
+  filter(!is.na(temp_c) & temp_c <= 0 & !is.na(p01m) & p01m > 0) %>%
+  mutate(
+    fresh_snow_density     = calc_fresh_snow_density(temp_c),
+    hourly_swe_mm          = p01m,
+    hourly_snow_depth_cm   = (hourly_swe_mm * (1000 / fresh_snow_density)) / 10,
+    cumulative_snowfall_cm = cumsum(hourly_snow_depth_cm)
+  )
+
+cat("=== FRESH SNOW DENSITY SUMMARY ===\n")
+cat(sprintf("Snow events: %d\n", nrow(snow_events)))
+cat(sprintf("Mean fresh snow density: %.1f kg/m³\n", mean(snow_events$fresh_snow_density)))
+cat(sprintf("Total cumulative snowfall: %.1f cm (%.1f in)\n",
+            max(snow_events$cumulative_snowfall_cm),
+            max(snow_events$cumulative_snowfall_cm) / 2.54))
+
+ggplot(snow_events, aes(x = datetime, y = fresh_snow_density)) +
+  geom_point(aes(color = temp_c), alpha = 0.6, size = 2) +
+  geom_smooth(method = "loess", color = "black", se = TRUE, alpha = 0.2) +
+  scale_color_gradient2(name = "Air Temp (°C)",
+                        low = "#2166ac", mid = "#f7f7f7", high = "#b2182b",
+                        midpoint = -8) +
+  labs(title = "Hourly Fresh Snow Density During Snow Events (WY2024)",
+       subtitle = "Telluride ASOS — Hedstrom-Pomeroy equation",
+       x = "Date", y = "Fresh Snow Density (kg/m³)") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+## 4. Density–Temperature Relationship and Model Comparison
+
+```{r}
+SNOTEL <- read.table("data/SNOWTEL.txt", header = TRUE, sep = "\t")
+colnames(SNOTEL) <- trimws(colnames(SNOTEL))
+SNOTEL$Date     <- as.Date(SNOTEL$Date, format = "%m/%d/%Y")
+SNOTEL           <- SNOTEL[order(SNOTEL$Date), ]
+
+SNOTEL$delta_depth <- c(NA, diff(SNOTEL$SNWD_in))
+SNOTEL$delta_swe   <- c(NA, diff(SNOTEL$WTEQ_in))
+SNOTEL$fresh_snow_event <- !is.na(SNOTEL$delta_depth) &
+  !is.na(SNOTEL$delta_swe) &
+  SNOTEL$delta_depth >= 0.5 &
+  SNOTEL$delta_swe >= 0.05
+
+SNOTEL$fresh_snow_density_obs <- ifelse(
+  SNOTEL$fresh_snow_event & SNOTEL$delta_depth > 0,
+  (SNOTEL$delta_swe / SNOTEL$delta_depth) * 1000, NA)
+
+daily_temp <- asos_data %>%
+  mutate(date = as.Date(datetime)) %>%
+  group_by(date) %>%
+  summarise(avg_temp_c = mean(temp_c, na.rm = TRUE), .groups = "drop")
+
+fresh_snow <- SNOTEL %>%
+  filter(fresh_snow_event & !is.na(fresh_snow_density_obs) &
+           fresh_snow_density_obs >= 50 & fresh_snow_density_obs <= 250) %>%
+  select(Date, delta_depth, delta_swe, fresh_snow_density_obs) %>%
+  left_join(daily_temp, by = c("Date" = "date")) %>%
+  filter(!is.na(avg_temp_c))
+
+if (nrow(fresh_snow) > 1) {
+  model_linear <- lm(fresh_snow_density_obs ~ avg_temp_c, data = fresh_snow)
+  temp_seq     <- seq(min(fresh_snow$avg_temp_c) - 2,
+                      max(fresh_snow$avg_temp_c) + 2, length.out = 100)
+  pred_df <- data.frame(
+    temp_c          = temp_seq,
+    SNOTEL_Linear   = predict(model_linear, data.frame(avg_temp_c = temp_seq)),
+    Hedstrom_Pomeroy = calc_fresh_snow_density(temp_seq)
+  )
+  pred_long <- tidyr::pivot_longer(pred_df, -temp_c,
+                                   names_to = "Model", values_to = "Density")
+
+  ggplot() +
+    geom_point(data = fresh_snow,
+               aes(x = avg_temp_c, y = fresh_snow_density_obs),
+               size = 3, alpha = 0.6) +
+    geom_line(data = pred_long,
+              aes(x = temp_c, y = Density, color = Model, linetype = Model),
+              linewidth = 1.2) +
+    scale_color_manual(values = c("SNOTEL_Linear" = "#4575b4",
+                                  "Hedstrom_Pomeroy" = "#d73027")) +
+    labs(title = "Fresh Snow Density vs. Air Temperature Calibration",
+         subtitle = paste("SNOTEL Site 713 & Telluride ASOS —",
+                          nrow(fresh_snow), "fresh snow events"),
+         x = "Average Air Temperature (°C)", y = "Fresh Snow Density (kg/m³)",
+         caption = paste("Linear R² =", round(summary(model_linear)$r.squared, 3))) +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "bottom")
+}
+```

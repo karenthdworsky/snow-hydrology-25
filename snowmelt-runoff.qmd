@@ -1,0 +1,177 @@
+---
+title: "Snowmelt & Runoff: Melt Factor Calibration and Baseflow Separation"
+author: "Karen Dworsky"
+date: "2025-11-19"
+format: html
+execute:
+  cache: true
+---
+
+## Setup
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(tidyr)
+```
+
+## 1. Melt Factor Calibration
+
+A temperature-index melt equation was calibrated using SNOTEL SWE change data:
+M = MF × (T − T₀), where T > T₀
+
+Non-linear least squares estimates MF (melt factor) and T₀ (base temperature).
+
+```{r}
+swe_data <- read.csv("data/NWIS_snowmelt.csv", stringsAsFactors = FALSE)
+
+swe_data <- swe_data %>%
+  mutate(datetime = mdy_hm(datetime))
+
+cat("=== DATA OVERVIEW ===\n")
+cat(sprintf("Records: %d\n", nrow(swe_data)))
+cat(sprintf("Temperature range: %.1f to %.1f °C\n",
+            min(swe_data$temp_C, na.rm = TRUE),
+            max(swe_data$temp_C, na.rm = TRUE)))
+cat(sprintf("SWE change range: %.2f to %.2f mm\n",
+            min(swe_data$change_SWE, na.rm = TRUE),
+            max(swe_data$change_SWE, na.rm = TRUE)))
+
+ggplot(swe_data, aes(x = temp_C, y = change_SWE)) +
+  geom_point(alpha = 0.5, color = "#4575b4") +
+  labs(title = "SWE Change vs. Temperature",
+       subtitle = "SNOTEL Site 713 — Red Mountain Pass",
+       x = "Air Temperature (°C)", y = "SWE Change (mm)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+## 2. Fit Temperature-Index Melt Equation
+
+```{r}
+swe_filtered <- swe_data %>%
+  filter(change_SWE != 0 & !is.na(temp_C) & !is.na(change_SWE) & temp_C <= 13)
+
+melt_model <- nls(change_SWE ~ MF * (temp_C - T0),
+                  data    = swe_filtered,
+                  start   = list(MF = 0.05, T0 = 5),
+                  control = nls.control(maxiter = 500))
+
+mf_estimate <- coef(melt_model)[["MF"]]
+t0_estimate <- coef(melt_model)[["T0"]]
+
+cat(sprintf("Melt factor (MF): %.4f mm/°C\n", mf_estimate))
+cat(sprintf("Base temperature (T0): %.2f °C\n", t0_estimate))
+cat(sprintf("Melt equation: M = %.4f × (T − %.2f)\n", mf_estimate, t0_estimate))
+
+temp_seq <- seq(t0_estimate, 13, length.out = 100)
+fit_line  <- data.frame(temp_C = temp_seq,
+                         change_SWE = mf_estimate * (temp_seq - t0_estimate))
+
+ggplot(swe_filtered, aes(x = temp_C, y = change_SWE)) +
+  geom_point(alpha = 0.5, color = "#4575b4") +
+  geom_line(data = fit_line, color = "#d73027", linewidth = 1.2) +
+  labs(title = "Melt Factor Calibration — Temperature-Index Model",
+       subtitle = sprintf("M = %.4f × (T − %.2f°C)", mf_estimate, t0_estimate),
+       x = "Temperature (°C)", y = "SWE Change (mm)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+## 3. Baseflow Separation — Lynne-Hollick Digital Filter
+
+The Lynne-Hollick recursive digital filter separates streamflow into baseflow and
+quickflow components. Three passes improve baseflow isolation.
+
+```{r}
+discharge_data <- read.csv("data/NWIS_discharge.csv", stringsAsFactors = FALSE)
+
+discharge_data <- discharge_data %>%
+  mutate(date     = mdy(time),
+         flow_cfs = as.numeric(value)) %>%
+  filter(!is.na(flow_cfs)) %>%
+  arrange(date)
+
+lynne_hollick_filter <- function(Q, a = 0.925) {
+  bf    <- numeric(length(Q))
+  bf[1] <- Q[1]
+  for (i in 2:length(Q)) {
+    bf[i] <- ((1 - a) / (1 + a)) * Q[i] + (a / (1 + a)) * bf[i - 1]
+    bf[i] <- min(bf[i], Q[i])
+  }
+  bf
+}
+
+baseflow <- discharge_data$flow_cfs
+for (i in 1:3) {
+  baseflow <- lynne_hollick_filter(baseflow)
+}
+
+discharge_data$baseflow_cfs   <- baseflow
+discharge_data$quickflow_cfs  <- discharge_data$flow_cfs - baseflow
+
+total_volume    <- sum(discharge_data$flow_cfs)    * 86400 / 43559.9
+baseflow_volume <- sum(discharge_data$baseflow_cfs) * 86400 / 43559.9
+
+cat("=== BASEFLOW SEPARATION RESULTS ===\n")
+cat(sprintf("Total flow volume:    %.0f acre-feet\n", total_volume))
+cat(sprintf("Baseflow volume:      %.0f acre-feet\n", baseflow_volume))
+cat(sprintf("Baseflow fraction:    %.1f%%\n", baseflow_volume / total_volume * 100))
+```
+
+## 4. Hydrograph Separation Plot
+
+```{r}
+hydro_long <- discharge_data %>%
+  select(date, Total = flow_cfs, Baseflow = baseflow_cfs) %>%
+  pivot_longer(cols = c(Total, Baseflow), names_to = "component", values_to = "flow_cfs")
+
+ggplot(discharge_data, aes(x = date)) +
+  geom_ribbon(aes(ymin = baseflow_cfs, ymax = flow_cfs),
+              fill = "#74add1", alpha = 0.5) +
+  geom_line(aes(y = flow_cfs,    color = "Total Flow"),  linewidth = 1) +
+  geom_line(aes(y = baseflow_cfs, color = "Baseflow"),    linewidth = 1) +
+  scale_color_manual(name = NULL,
+                     values = c("Total Flow" = "black", "Baseflow" = "#2166ac")) +
+  labs(title = "Hydrograph Separation — Lynne-Hollick Filter (WY2024)",
+       subtitle = "Shaded area = quickflow (snowmelt runoff component)",
+       x = "Date", y = "Flow (cfs)") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## 5. Hourly Melt Estimation
+
+Applying the calibrated melt factor to hourly ASOS temperature data:
+
+```{r}
+asos_melt <- read.csv("data/asos_data.txt", stringsAsFactors = FALSE)
+
+asos_melt <- asos_melt %>%
+  mutate(
+    valid  = ymd_hm(valid),
+    tmpc   = as.numeric(tmpc),
+    hourly_melt = ifelse(!is.na(tmpc) & tmpc > t0_estimate,
+                         mf_estimate * (tmpc - t0_estimate), 0)
+  ) %>%
+  filter(!is.na(valid))
+
+cat(sprintf("Total estimated melt: %.1f mm\n", sum(asos_melt$hourly_melt, na.rm = TRUE)))
+
+asos_daily_melt <- asos_melt %>%
+  mutate(date = as.Date(valid)) %>%
+  group_by(date) %>%
+  summarise(daily_melt = sum(hourly_melt, na.rm = TRUE), .groups = "drop")
+
+ggplot(asos_daily_melt, aes(x = date, y = daily_melt)) +
+  geom_col(fill = "#4575b4", alpha = 0.8) +
+  labs(title = "Daily Estimated Snowmelt — Temperature-Index Model (WY2024)",
+       subtitle = sprintf("MF = %.4f mm/°C, T₀ = %.1f°C", mf_estimate, t0_estimate),
+       x = "Date", y = "Daily Melt (mm)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```

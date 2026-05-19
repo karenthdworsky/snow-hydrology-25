@@ -1,0 +1,198 @@
+---
+title: "Blowing Snow: Snow Metamorphism, Densification, and Pomeroy Transport"
+author: "Karen Dworsky"
+date: "2025-11-10"
+format: html
+execute:
+  cache: true
+---
+
+## Setup
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(tidyr)
+
+asos_data <- read.csv("data/ASOS2.txt", header = TRUE, stringsAsFactors = FALSE)
+
+asos_data <- asos_data %>%
+  mutate(
+    datetime   = as.POSIXct(valid, format = "%Y-%m-%d %H:%M", tz = "UTC"),
+    p01i       = as.numeric(ifelse(p01i %in% c("M", ""), NA, p01i)),
+    tmpf       = as.numeric(ifelse(tmpf %in% c("M", ""), NA, tmpf)),
+    sknt       = as.numeric(ifelse(sknt %in% c("M", ""), NA, sknt)),
+    temp_C     = (tmpf - 32) * 5/9,
+    snowfall_m = ifelse(!is.na(temp_C) & !is.na(p01i) & temp_C <= 0 & p01i > 0,
+                        p01i * 0.0254, 0)
+  ) %>%
+  arrange(datetime)
+```
+
+## 1. Snow Metamorphism and Densification Model
+
+The densification model tracks old and new snow layers separately:
+- Old snow density approaches ρ_max via exponential decay
+- New snow density uses the temperature-dependent equation: ρ = 50 + 1.7 × (T + 15)^(3/2)
+
+```{r}
+rho_max     <- 350   # kg/m³ — maximum density (from SNOTEL observations)
+k           <- 0.01  # densification rate (per hour)
+density_old <- 250   # kg/m³ — initial old snow density
+depth_old   <- 0
+depth_new   <- 0
+density_new <- 0
+
+depth_total   <- numeric(nrow(asos_data))
+density_total <- numeric(nrow(asos_data))
+
+new_snow_density <- function(temp_C) {
+  pmax(50, pmin(400, 50 + 1.7 * (temp_C + 15)^(3/2)))
+}
+
+for (i in seq_len(nrow(asos_data))) {
+  temp_C     <- asos_data$temp_C[i]
+  snowfall_m <- asos_data$snowfall_m[i]
+
+  density_old <- rho_max - (rho_max - density_old) * exp(-k)
+  depth_old   <- depth_old * density_old / (density_old + k * depth_old)
+
+  if (!is.na(temp_C) && !is.na(snowfall_m) && snowfall_m > 0) {
+    density_new <- new_snow_density(temp_C)
+    depth_new   <- depth_new + snowfall_m * 100  # convert m → cm
+  }
+
+  total_depth <- depth_old + depth_new
+  depth_total[i] <- total_depth
+  if (total_depth > 0) {
+    density_total[i] <- (depth_old * density_old + depth_new * density_new) / total_depth
+  } else {
+    density_total[i] <- density_old
+  }
+
+  if (!is.na(snowfall_m) && snowfall_m > 0) {
+    depth_old   <- depth_total[i]
+    density_old <- density_total[i]
+    depth_new   <- 0
+    density_new <- 0
+  }
+}
+
+asos_data$modeled_depth_cm   <- depth_total
+asos_data$modeled_density    <- density_total
+
+asos_data <- asos_data %>%
+  mutate(
+    snowfall_cm        = snowfall_m * 100,
+    cumulative_snowfall_cm = cumsum(snowfall_cm)
+  )
+```
+
+## 2. Modeled Snow Depth vs. Cumulative Snowfall
+
+```{r}
+depth_plot <- ggplot(asos_data, aes(x = datetime)) +
+  geom_line(aes(y = cumulative_snowfall_cm, color = "Cumulative Snowfall"), linewidth = 1) +
+  geom_line(aes(y = modeled_depth_cm, color = "Modeled Depth (with metamorphism)"),
+            linewidth = 1) +
+  scale_color_manual(
+    values = c("Cumulative Snowfall" = "#2166ac",
+               "Modeled Depth (with metamorphism)" = "#1a9641")) +
+  labs(title = "Cumulative Snowfall vs. Modeled Snow Depth (WY2024)",
+       subtitle = "Telluride ASOS — Snow densification model",
+       x = "Date", y = "Snow Depth (cm)", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(depth_plot)
+```
+
+## 3. Hourly Bulk Snow Density
+
+```{r}
+density_plot <- ggplot(asos_data, aes(x = datetime, y = modeled_density)) +
+  geom_line(color = "#4575b4") +
+  labs(title = "Hourly Bulk Snow Density (WY2024)",
+       subtitle = "Telluride ASOS — Exponential densification model",
+       x = "Date", y = expression("Density (kg/m"^3*")")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(density_plot)
+```
+
+## 4. Hedstrom-Pomeroy Fresh Snow Density
+
+```{r}
+hedstrom_pomeroy <- function(temp_C) {
+  pmax(50, pmin(200, 67.92 + 51.25 * exp(temp_C / 2.59)))
+}
+
+asos_data <- asos_data %>%
+  mutate(fresh_snow_density_hp = ifelse(!is.na(temp_C) & temp_C <= 0 & !is.na(p01i) & p01i > 0,
+                                        hedstrom_pomeroy(temp_C), NA))
+
+ggplot(asos_data, aes(x = datetime, y = fresh_snow_density_hp)) +
+  geom_line(color = "#4575b4") +
+  labs(title = "Hourly Fresh Snow Density — Hedstrom-Pomeroy (WY2024)",
+       subtitle = "Telluride ASOS",
+       x = "Date", y = "Fresh Snow Density (kg/m³)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+asos_monthly <- asos_data %>%
+  mutate(month = floor_date(datetime, "month")) %>%
+  group_by(month) %>%
+  summarise(avg_density = mean(fresh_snow_density_hp, na.rm = TRUE), .groups = "drop")
+
+ggplot(asos_monthly, aes(x = month, y = avg_density)) +
+  geom_col(fill = "#4575b4", alpha = 0.8) +
+  scale_x_datetime(date_labels = "%b %Y") +
+  labs(title = "Monthly Average Fresh Snow Density — Hedstrom-Pomeroy (WY2024)",
+       x = "Month", y = "Average Fresh Snow Density (kg/m³)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+## 5. Observed vs. Modeled Bulk Density (SNOTEL) — Sturm et al. 2010
+
+```{r}
+snotel_data <- read.table("data/SNOWTEL.txt", header = TRUE, sep = "\t")
+colnames(snotel_data) <- trimws(colnames(snotel_data))
+snotel_data$Date  <- as.Date(snotel_data$Date, format = "%m/%d/%Y")
+snotel_data       <- snotel_data[order(snotel_data$Date), ]
+
+snotel_data <- snotel_data %>%
+  mutate(
+    depth_m     = SNWD_in * 0.0254,
+    swe_m       = WTEQ_in * 0.0254,
+    obs_density = ifelse(depth_m > 0, swe_m / depth_m, NA),
+    doy         = row_number()
+  )
+
+sturm_density <- function(depth_cm, doy) {
+  rho_max <- 0.5975
+  k1      <- 0.0012
+  k2      <- 0.0038
+  rho_0   <- 0.024
+  rho_max * (1 - exp(-k1 * depth_cm - k2 * doy)) + rho_0
+}
+
+snotel_data <- snotel_data %>%
+  mutate(sturm_density_gcc = sturm_density(depth_m * 100, doy))
+
+ggplot(snotel_data, aes(x = Date)) +
+  geom_point(aes(y = obs_density), color = "#2166ac", size = 2, alpha = 0.7) +
+  geom_line(aes(y = sturm_density_gcc), color = "#d73027", linewidth = 1) +
+  labs(title = "Observed vs. Modeled Bulk Snow Density (WY2024)",
+       subtitle = "Red Mountain Pass SNOTEL Site 713 | Sturm et al. 2010 (alpine)",
+       caption = "Observed (blue) | Modeled (red)",
+       x = "Date", y = "Bulk Density (g/cm³)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```

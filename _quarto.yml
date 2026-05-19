@@ -1,0 +1,31 @@
+project:
+  type: website
+  output-dir: docs
+
+website:
+  title: "Snow Hydrology — Fall 2025"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+      - href: climate-observations.qmd
+        text: Climate Observations
+      - href: cloud-cover.qmd
+        text: Cloud Cover
+      - href: precipitation-analysis.qmd
+        text: Precipitation Analysis
+      - href: albedo.qmd
+        text: Albedo
+      - href: snow-interception.qmd
+        text: Snow Interception
+      - href: blowing-snow.qmd
+        text: Blowing Snow
+      - href: radiation-energy-balance.qmd
+        text: Radiation & Energy Balance
+      - href: snowmelt-runoff.qmd
+        text: Snowmelt & Runoff
+
+format:
+  html:
+    theme: cosmo
+    toc: true

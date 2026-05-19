@@ -1,0 +1,434 @@
+---
+title: "Cloud Cover, Precipitation Form, and Snow Crystal Morphology"
+author: "Karen Dworsky"
+date: "2025-09-23"
+format: html
+execute:
+  cache: true
+---
+
+## Setup
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(readr)
+library(tidyr)
+
+ASOS <- read.table("data/ASOS_ST.txt", sep = ",", header = TRUE)
+```
+
+## Cloud Cover Functions
+
+```{r}
+cloud_cover_to_fraction <- function(sky_condition) {
+  case_when(
+    sky_condition == "SKC" | sky_condition == "CLR" ~ 0.0,
+    sky_condition == "FEW" ~ 0.125,
+    sky_condition == "SCT" ~ 0.375,
+    sky_condition == "BKN" ~ 0.625,
+    sky_condition == "OVC" ~ 1.0,
+    TRUE ~ NA_real_
+  )
+}
+
+categorize_cloud_cover <- function(sky_condition) {
+  case_when(
+    sky_condition == "SKC" | sky_condition == "CLR" ~ "Clear",
+    sky_condition == "FEW" ~ "Few",
+    sky_condition == "SCT" ~ "Scattered",
+    sky_condition == "BKN" ~ "Broken",
+    sky_condition == "OVC" ~ "Overcast",
+    TRUE ~ "Missing"
+  )
+}
+
+assign_wy_month <- function(datetime) {
+  calendar_month <- month(datetime)
+  wy_month_num   <- ifelse(calendar_month >= 10, calendar_month - 9, calendar_month + 3)
+  factor(wy_month_num, levels = 1:12,
+         labels = c("Oct","Nov","Dec","Jan","Feb","Mar",
+                    "Apr","May","Jun","Jul","Aug","Sep"))
+}
+```
+
+## 1. Cloud Cover Frequency — Lowest Deck vs All Decks (WY2024)
+
+```{r}
+data_wy24 <- ASOS %>%
+  mutate(datetime = ymd_hm(valid)) %>%
+  filter(datetime >= ymd("2023-10-01") & datetime <= ymd("2024-09-30")) %>%
+  filter(format(datetime, "%Y-%m") %in%
+           c("2023-10","2023-11","2023-12","2024-01","2024-02","2024-03",
+             "2024-04","2024-05","2024-06","2024-07","2024-08","2024-09"))
+
+processed_data <- data_wy24 %>%
+  mutate(
+    datetime      = ymd_hm(valid),
+    wy_month      = assign_wy_month(datetime),
+    cloud_type_lowest   = categorize_cloud_cover(skyc1),
+    cloud_fraction_lowest = cloud_cover_to_fraction(skyc1),
+    skyc1_frac = cloud_cover_to_fraction(skyc1),
+    skyc2_frac = cloud_cover_to_fraction(skyc2),
+    skyc3_frac = cloud_cover_to_fraction(skyc3),
+    skyc4_frac = cloud_cover_to_fraction(skyc4),
+    all_decks_fraction = pmax(
+      ifelse(is.na(skyc1_frac), 0, skyc1_frac),
+      ifelse(is.na(skyc2_frac), 0, skyc2_frac),
+      ifelse(is.na(skyc3_frac), 0, skyc3_frac),
+      ifelse(is.na(skyc4_frac), 0, skyc4_frac),
+      na.rm = TRUE
+    ),
+    cloud_type_all = case_when(
+      all_decks_fraction == 0.0  ~ "Clear",
+      all_decks_fraction <= 0.125 ~ "Few",
+      all_decks_fraction <= 0.375 ~ "Scattered",
+      all_decks_fraction < 1.0   ~ "Broken",
+      all_decks_fraction == 1.0  ~ "Overcast",
+      TRUE ~ "Missing"
+    )
+  ) %>%
+  filter(!is.na(cloud_fraction_lowest))
+
+hourly_data <- processed_data %>%
+  group_by(wy_month, date = date(datetime), hour = hour(datetime)) %>%
+  summarise(
+    cloud_type_lowest     = first(cloud_type_lowest),
+    cloud_fraction_lowest = mean(cloud_fraction_lowest, na.rm = TRUE),
+    cloud_type_all        = first(cloud_type_all),
+    cloud_fraction_all    = mean(all_decks_fraction, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+monthly_freq_lowest <- hourly_data %>%
+  count(wy_month, cloud_type_lowest) %>%
+  group_by(wy_month) %>%
+  mutate(total_obs = sum(n), frequency = n / total_obs * 100,
+         analysis_type = "Lowest Deck Only") %>%
+  filter(cloud_type_lowest != "Missing") %>%
+  rename(cloud_type = cloud_type_lowest) %>%
+  ungroup()
+
+monthly_freq_all <- hourly_data %>%
+  count(wy_month, cloud_type_all) %>%
+  group_by(wy_month) %>%
+  mutate(total_obs = sum(n), frequency = n / total_obs * 100,
+         analysis_type = "All Cloud Decks") %>%
+  filter(cloud_type_all != "Missing") %>%
+  rename(cloud_type = cloud_type_all) %>%
+  ungroup()
+
+monthly_freq_combined <- bind_rows(monthly_freq_lowest, monthly_freq_all)
+
+monthly_avg_lowest <- hourly_data %>%
+  group_by(wy_month) %>%
+  summarise(avg_cloud_fraction = mean(cloud_fraction_lowest, na.rm = TRUE),
+            analysis_type = "Lowest Deck Only", .groups = "drop")
+
+monthly_avg_all <- hourly_data %>%
+  group_by(wy_month) %>%
+  summarise(avg_cloud_fraction = mean(cloud_fraction_all, na.rm = TRUE),
+            analysis_type = "All Cloud Decks", .groups = "drop")
+
+monthly_avg_combined <- bind_rows(monthly_avg_lowest, monthly_avg_all)
+
+p1 <- ggplot() +
+  geom_col(data = monthly_freq_combined %>%
+             mutate(cloud_type = factor(cloud_type,
+                                       levels = c("Overcast","Broken","Scattered","Few","Clear"))),
+           aes(x = wy_month, y = frequency, fill = cloud_type),
+           position = "stack", alpha = 0.8, width = 0.7) +
+  geom_line(data = monthly_avg_combined,
+            aes(x = as.numeric(wy_month), y = avg_cloud_fraction * 100, group = 1),
+            color = "red", linewidth = 1.2) +
+  geom_point(data = monthly_avg_combined,
+             aes(x = as.numeric(wy_month), y = avg_cloud_fraction * 100),
+             color = "black", size = 2) +
+  facet_wrap(~ analysis_type, ncol = 1) +
+  scale_fill_manual(name = "Cloud Cover Type",
+    values = c("Clear"="#87CEEB","Few"="#98FB98","Scattered"="#FFD700",
+               "Broken"="#FFA500","Overcast"="#696969"),
+    breaks = c("Clear","Few","Scattered","Broken","Overcast")) +
+  scale_y_continuous(name = "Cloud Cover Type Frequency (%)", limits = c(0, 100),
+    sec.axis = sec_axis(~ . / 100, name = "Average Cloud Cover Fraction",
+                        breaks = seq(0, 1, 0.2))) +
+  labs(title = "Cloud Cover Frequency: Lowest Deck vs All Decks",
+       subtitle = "TEX ASOS Station - Water Year 2024",
+       x = "Water Year Month",
+       caption = "Red line: Average monthly cloud cover fraction") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+
+print(p1)
+```
+
+## 2. Precipitation Probability (Hourly Basis, WY2024)
+
+```{r}
+processed_data_precip <- ASOS %>%
+  mutate(
+    datetime      = ymd_hm(valid),
+    cloud_type    = categorize_cloud_cover(skyc1),
+    cloud_fraction = cloud_cover_to_fraction(skyc1),
+    p01m = p01i * 25.4,
+    has_precip = p01m > 0
+  ) %>%
+  filter(!is.na(cloud_fraction))
+
+hourly_data_all <- processed_data_precip %>%
+  group_by(year = year(datetime), month = month(datetime, label = TRUE),
+           date = date(datetime), hour = hour(datetime)) %>%
+  summarise(
+    cloud_type    = first(cloud_type),
+    cloud_fraction = mean(cloud_fraction, na.rm = TRUE),
+    p01m          = max(p01m, na.rm = TRUE),
+    has_precip    = any(has_precip, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+hourly_data_wy24 <- hourly_data_all %>%
+  mutate(datetime = ymd_hm(paste(date, hour, ":00"))) %>%
+  filter(datetime >= ymd("2023-10-01") & datetime <= ymd("2024-09-30")) %>%
+  mutate(wy_month = assign_wy_month(datetime))
+
+precip_analysis <- hourly_data_wy24 %>%
+  mutate(
+    has_measurable_precip = p01m >= 0.254,
+    has_any_precip        = p01m > 0,
+    has_trace_only        = p01m > 0 & p01m < 0.254
+  ) %>%
+  group_by(wy_month) %>%
+  summarise(
+    total_hours         = n(),
+    hours_with_measurable = sum(has_measurable_precip, na.rm = TRUE),
+    hours_with_any      = sum(has_any_precip, na.rm = TRUE),
+    freq_without_trace  = hours_with_measurable / total_hours * 100,
+    freq_with_trace     = hours_with_any / total_hours * 100,
+    trace_only_freq     = sum(has_trace_only, na.rm = TRUE) / total_hours * 100,
+    .groups = "drop"
+  )
+
+p2 <- ggplot(precip_analysis, aes(x = wy_month)) +
+  geom_col(aes(y = freq_without_trace), fill = "#d73027", alpha = 0.8, width = 0.6) +
+  geom_line(aes(y = trace_only_freq, group = 1), color = "orange", linewidth = 1.5) +
+  geom_point(aes(y = trace_only_freq), color = "orange", size = 3) +
+  labs(title = "Monthly Precipitation Frequency (WY2024)",
+       x = "Water Year Month", y = "Precipitation Frequency (% of hours)",
+       caption = "Red bars: Measurable (≥0.254 mm) | Orange line: Trace events only") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p2)
+```
+
+## 3. Precipitation Form in Clouds (WY2024)
+
+```{r}
+TELLURIDE_ELEVATION_M <- 8750 * 0.3048
+STANDARD_LAPSE_RATE   <- 0.65
+
+cloud_precip_all <- data_wy24 %>%
+  mutate(
+    tmpf  = as.numeric(ifelse(tmpf  == "M" | tmpf  == "" | is.na(tmpf),  NA, tmpf)),
+    skyl1 = as.numeric(ifelse(skyl1 == "M" | skyl1 == "" | is.na(skyl1), NA, skyl1)),
+    datetime = ymd_hm(valid),
+    wy_month = assign_wy_month(datetime)
+  ) %>%
+  filter(!is.na(skyc1), skyc1 != "CLR", skyc1 != "SKC") %>%
+  mutate(
+    temp_c             = ifelse(!is.na(tmpf), (tmpf - 32) * 5/9, NA),
+    cloud_base_m_agl   = ifelse(!is.na(skyl1), skyl1 * 0.3048, NA),
+    height_diff_100m   = ifelse(!is.na(cloud_base_m_agl), cloud_base_m_agl / 100, NA),
+    temp_at_cloud_base = ifelse(!is.na(temp_c) & !is.na(height_diff_100m),
+                               temp_c - (STANDARD_LAPSE_RATE * height_diff_100m), NA),
+    precip_form = case_when(
+      is.na(temp_c) | is.na(cloud_base_m_agl) ~ "Unknown",
+      temp_at_cloud_base > 0   ~ "Liquid (Rain)",
+      temp_at_cloud_base <= 0  ~ "Solid (Snow/Ice)",
+      TRUE ~ "Unknown"
+    )
+  )
+
+monthly_precip_form <- cloud_precip_all %>%
+  group_by(wy_month) %>%
+  summarise(
+    total_obs   = n(),
+    liquid_pct  = sum(precip_form == "Liquid (Rain)") / total_obs * 100,
+    solid_pct   = sum(precip_form == "Solid (Snow/Ice)") / total_obs * 100,
+    unknown_pct = sum(precip_form == "Unknown") / total_obs * 100,
+    avg_surface_temp    = mean(temp_c, na.rm = TRUE),
+    avg_cloud_base_m    = mean(cloud_base_m_agl, na.rm = TRUE),
+    avg_cloud_temp      = mean(temp_at_cloud_base, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+monthly_precip_long <- monthly_precip_form %>%
+  select(wy_month, solid_pct, liquid_pct, unknown_pct, avg_cloud_temp) %>%
+  pivot_longer(cols = c(solid_pct, liquid_pct, unknown_pct),
+               names_to = "precip_type", values_to = "percentage") %>%
+  mutate(precip_type = factor(precip_type,
+                              levels = c("unknown_pct","liquid_pct","solid_pct"),
+                              labels = c("Unknown","Liquid (Rain)","Solid (Snow/Ice)")))
+
+p_form <- ggplot() +
+  geom_col(data = monthly_precip_long,
+           aes(x = wy_month, y = percentage, fill = precip_type),
+           position = "stack", alpha = 0.8, width = 0.8) +
+  geom_line(data = monthly_precip_form,
+            aes(x = wy_month, y = (avg_cloud_temp + 20) * 2.5, group = 1),
+            color = "orange", linewidth = 1.5) +
+  geom_point(data = monthly_precip_form,
+             aes(x = wy_month, y = (avg_cloud_temp + 20) * 2.5),
+             color = "orange", size = 3) +
+  geom_hline(yintercept = (0 + 20) * 2.5, color = "black",
+             linetype = "dashed", alpha = 0.7) +
+  scale_fill_manual(name = "Precipitation Form",
+    values = c("Solid (Snow/Ice)" = "#2166ac", "Liquid (Rain)" = "#762a83",
+               "Unknown" = "#969696")) +
+  scale_y_continuous(name = "% of Cloudy Observations", limits = c(0, 100),
+    sec.axis = sec_axis(~ (. / 2.5) - 20, name = "Avg Cloud Base Temp (°C)",
+                        breaks = seq(-15, 15, 5))) +
+  labs(title = "Monthly Distribution of Precipitation Form in Clouds (WY2024)",
+       subtitle = "TEX ASOS — Water Year 2024",
+       x = "Water Year Month",
+       caption = "Orange line: Avg cloud base temp | Black dashed: 0°C") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+
+print(p_form)
+
+print(monthly_precip_form %>%
+      select(wy_month, total_obs, solid_pct, liquid_pct, unknown_pct,
+             avg_surface_temp, avg_cloud_base_m, avg_cloud_temp) %>%
+      mutate(across(where(is.numeric), ~round(., 1))))
+```
+
+## 4. Snow Crystal Morphology (WY2024)
+
+```{r}
+classify_snow_crystal <- function(temp_c, supersaturation) {
+  case_when(
+    temp_c > 0 ~ "No Snow (Liquid)",
+    temp_c >= -5 ~ case_when(
+      supersaturation >= 0.15 ~ "Needles",
+      supersaturation >= 0.05 ~ "Solid Plates",
+      TRUE ~ "Thin Plates"),
+    temp_c >= -10 ~ case_when(
+      supersaturation >= 0.2  ~ "Needles",
+      supersaturation >= 0.1  ~ "Hollow Columns",
+      TRUE ~ "Solid Plates"),
+    temp_c >= -15 ~ case_when(
+      supersaturation >= 0.25 ~ "Stellars",
+      supersaturation >= 0.15 ~ "Sectored Plates",
+      supersaturation >= 0.1  ~ "Solid Plates",
+      TRUE ~ "Thin Plates"),
+    temp_c >= -22 ~ case_when(
+      supersaturation >= 0.2 ~ "Stellars",
+      supersaturation >= 0.1 ~ "Plates",
+      TRUE ~ "Columns"),
+    TRUE ~ "Columns"
+  )
+}
+
+estimate_supersaturation <- function(temp_c, rh_percent) {
+  case_when(
+    is.na(rh_percent)   ~ NA_real_,
+    rh_percent >= 95    ~ 0.25,
+    rh_percent >= 85    ~ 0.15,
+    rh_percent >= 70    ~ 0.08,
+    TRUE                ~ 0.03
+  )
+}
+
+snow_crystal_data <- data_wy24 %>%
+  mutate(
+    tmpf  = as.numeric(ifelse(tmpf  == "M" | is.na(tmpf),  NA, tmpf)),
+    skyl1 = as.numeric(ifelse(skyl1 == "M" | is.na(skyl1), NA, skyl1)),
+    relh  = as.numeric(ifelse(relh  == "M" | is.na(relh),  NA, relh)),
+    datetime = ymd_hm(valid),
+    wy_month = assign_wy_month(datetime)
+  ) %>%
+  filter(!is.na(skyc1), skyc1 != "CLR", skyc1 != "SKC") %>%
+  mutate(
+    temp_c             = ifelse(!is.na(tmpf), (tmpf - 32) * 5/9, NA),
+    cloud_base_m_agl   = ifelse(!is.na(skyl1), skyl1 * 0.3048, NA),
+    height_diff_100m   = ifelse(!is.na(cloud_base_m_agl), cloud_base_m_agl / 100, NA),
+    temp_at_cloud_base = ifelse(!is.na(temp_c) & !is.na(height_diff_100m),
+                               temp_c - (STANDARD_LAPSE_RATE * height_diff_100m), NA),
+    supersaturation  = estimate_supersaturation(temp_at_cloud_base, relh),
+    crystal_type     = case_when(
+      is.na(temp_at_cloud_base) | is.na(supersaturation) ~ "Unknown",
+      TRUE ~ classify_snow_crystal(temp_at_cloud_base, supersaturation)
+    ),
+    crystal_category = case_when(
+      crystal_type %in% c("Columns","Hollow Columns","Solid Prisms") ~ "Columns",
+      crystal_type %in% c("Thin Plates","Solid Plates","Sectored Plates","Plates") ~ "Plates",
+      crystal_type == "Needles"          ~ "Needles",
+      crystal_type == "Stellars"         ~ "Stellars",
+      crystal_type == "No Snow (Liquid)" ~ "No Snow",
+      TRUE ~ "Unknown"
+    )
+  )
+
+monthly_crystal_form <- snow_crystal_data %>%
+  group_by(wy_month) %>%
+  summarise(
+    total_obs    = n(),
+    columns_pct  = sum(crystal_category == "Columns")  / total_obs * 100,
+    plates_pct   = sum(crystal_category == "Plates")   / total_obs * 100,
+    needles_pct  = sum(crystal_category == "Needles")  / total_obs * 100,
+    stellars_pct = sum(crystal_category == "Stellars") / total_obs * 100,
+    unknown_pct  = sum(crystal_category == "Unknown")  / total_obs * 100,
+    avg_cloud_temp       = mean(temp_at_cloud_base, na.rm = TRUE),
+    avg_supersaturation  = mean(supersaturation, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+monthly_snow_long <- monthly_crystal_form %>%
+  select(wy_month, columns_pct, plates_pct, needles_pct, stellars_pct, unknown_pct) %>%
+  pivot_longer(cols = c(columns_pct, plates_pct, needles_pct, stellars_pct, unknown_pct),
+               names_to = "crystal_type", values_to = "percentage") %>%
+  mutate(crystal_type = factor(crystal_type,
+    levels = c("unknown_pct","stellars_pct","needles_pct","plates_pct","columns_pct"),
+    labels = c("Unknown","Stellars","Needles","Plates","Columns")))
+
+p_crystal <- ggplot() +
+  geom_col(data = monthly_snow_long,
+           aes(x = wy_month, y = percentage, fill = crystal_type),
+           position = "stack", alpha = 0.9, width = 0.8) +
+  geom_line(data = monthly_crystal_form,
+            aes(x = wy_month, y = (avg_cloud_temp + 25) * 2, group = 1),
+            color = "black", linewidth = 1.2) +
+  geom_point(data = monthly_crystal_form,
+             aes(x = wy_month, y = (avg_cloud_temp + 25) * 2),
+             color = "black", size = 3) +
+  geom_hline(yintercept = (0 + 25) * 2, color = "red",
+             linetype = "dashed", alpha = 0.7) +
+  scale_fill_manual(name = "Snow Crystal Type",
+    values = c("Columns"="#1f77b4","Plates"="#ff7f0e","Needles"="#2ca02c",
+               "Stellars"="#d62728","Unknown"="#7f7f7f")) +
+  scale_y_continuous(name = "% of Cloudy Observations", limits = c(0, 100),
+    sec.axis = sec_axis(~ (. / 2) - 25, name = "Avg Cloud Base Temp (°C)",
+                        breaks = seq(-40, 10, 5))) +
+  labs(title = "Monthly Distribution of Snow Crystal Types in Clouds",
+       subtitle = "TEX ASOS — Water Year 2024",
+       x = "Water Year Month",
+       caption = "Black line: Avg cloud base temp | Red dashed: 0°C") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+
+print(p_crystal)
+
+print(monthly_crystal_form %>%
+      select(wy_month, total_obs, columns_pct, plates_pct, needles_pct,
+             stellars_pct, unknown_pct) %>%
+      mutate(across(where(is.numeric), ~round(., 1))))
+```

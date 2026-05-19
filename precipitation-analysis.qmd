@@ -1,0 +1,290 @@
+---
+title: "Precipitation Analysis: Undercatch, Snow Fraction, and Wind"
+author: "Karen Dworsky"
+date: "2025-10-06"
+format: html
+execute:
+  cache: true
+---
+
+## Setup
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(tidyr)
+
+ASOS <- read.table("data/ASOS_ST.txt", sep = ",", header = TRUE)
+```
+
+## 1. No Trace Events
+
+There are no Trace events in this dataset.
+
+## 2. Undercatch Correction
+
+```{r}
+RAIN_CATCH_EFFICIENCY <- 0.95
+
+estimate_snow_catch_efficiency <- function(wind_speed_ms) {
+  catch_eff <- ifelse(is.na(wind_speed_ms), 0.70,
+                      1.00 - (wind_speed_ms * 0.08))
+  pmax(0.40, pmin(0.95, catch_eff))
+}
+
+precip_wy24 <- ASOS %>%
+  mutate(
+    datetime = ymd_hm(valid),
+    p01i     = as.numeric(ifelse(p01i == "M" | p01i == "" | is.na(p01i), NA, p01i)),
+    tmpf     = as.numeric(ifelse(tmpf == "M" | tmpf == "" | is.na(tmpf), NA, tmpf)),
+    sknt     = as.numeric(ifelse(sknt == "M" | sknt == "" | is.na(sknt), NA, sknt))
+  ) %>%
+  filter(datetime >= ymd("2023-10-01") & datetime <= ymd("2024-09-30")) %>%
+  arrange(datetime) %>%
+  mutate(
+    p01m   = p01i * 25.4,
+    temp_c = (tmpf - 32) * 5/9,
+    wind_ms = sknt * 0.514444
+  )
+
+precip_corrected <- precip_wy24 %>%
+  filter(!is.na(p01m), p01m > 0) %>%
+  mutate(
+    precip_type = case_when(
+      is.na(temp_c)             ~ "Unknown",
+      temp_c <= 0               ~ "Snow",
+      temp_c > 0 & temp_c <= 3 ~ "Mixed",
+      temp_c > 3                ~ "Rain",
+      TRUE ~ "Unknown"
+    ),
+    snow_catch_eff   = estimate_snow_catch_efficiency(wind_ms),
+    catch_efficiency = case_when(
+      precip_type == "Rain"  ~ RAIN_CATCH_EFFICIENCY,
+      precip_type == "Snow"  ~ snow_catch_eff,
+      precip_type == "Mixed" ~ (RAIN_CATCH_EFFICIENCY + snow_catch_eff) / 2,
+      TRUE ~ 0.80
+    ),
+    p01m_corrected    = p01m / catch_efficiency,
+    correction_amount = p01m_corrected - p01m
+  )
+
+precip_complete <- precip_wy24 %>%
+  left_join(
+    precip_corrected %>% select(datetime, precip_type, catch_efficiency,
+                                p01m_corrected, correction_amount),
+    by = "datetime"
+  ) %>%
+  mutate(
+    p01m           = ifelse(is.na(p01m), 0, p01m),
+    p01m_corrected = ifelse(is.na(p01m_corrected), p01m, p01m_corrected),
+    precip_type    = ifelse(is.na(precip_type), "No Precip", precip_type),
+    cumulative_uncorrected = cumsum(p01m),
+    cumulative_corrected   = cumsum(p01m_corrected)
+  )
+
+precip_summary <- precip_corrected %>%
+  group_by(precip_type) %>%
+  summarise(
+    n_events          = n(),
+    total_measured    = sum(p01m, na.rm = TRUE),
+    total_corrected   = sum(p01m_corrected, na.rm = TRUE),
+    avg_catch_efficiency = mean(catch_efficiency, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("=== PRECIPITATION TYPE SUMMARY ===\n")
+print(precip_summary %>% mutate(across(where(is.numeric), ~round(., 2))))
+
+total_measured  <- max(precip_complete$cumulative_uncorrected, na.rm = TRUE)
+total_corrected <- max(precip_complete$cumulative_corrected, na.rm = TRUE)
+cat(sprintf("\nUncorrected: %.2f mm | Corrected: %.2f mm | Increase: %.1f%%\n",
+            total_measured, total_corrected,
+            (total_corrected - total_measured) / total_measured * 100))
+
+p1 <- ggplot(precip_complete, aes(x = datetime)) +
+  geom_line(aes(y = cumulative_uncorrected, color = "Uncorrected"), linewidth = 1.2) +
+  geom_line(aes(y = cumulative_corrected, color = "Corrected"),   linewidth = 1.2) +
+  scale_color_manual(name = "Cumulative Precipitation",
+    values = c("Uncorrected" = "#d73027", "Corrected" = "#2166ac")) +
+  labs(title = "Cumulative Hourly Precipitation: Undercatch Correction (WY2024)",
+       subtitle = "Telluride ASOS — Corrected for Wind-Induced Undercatch",
+       x = "Date", y = "Cumulative Precipitation (mm)") +
+  theme_minimal() +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p1)
+```
+
+## 3. Precipitation as Snow — Three Methods
+
+```{r}
+TEMP_ALL_SNOW <- -2
+TEMP_ALL_RAIN <-  4
+
+calc_snow_probability <- function(temp_c) {
+  temp_mid  <- (TEMP_ALL_SNOW + TEMP_ALL_RAIN) / 2
+  temp_range <- TEMP_ALL_RAIN - TEMP_ALL_SNOW
+  k          <- 10 / temp_range
+  prob_snow  <- 1 / (1 + exp(k * (temp_c - temp_mid)))
+  prob_snow  <- ifelse(temp_c <= TEMP_ALL_SNOW, 1.0, prob_snow)
+  prob_snow  <- ifelse(temp_c >= TEMP_ALL_RAIN, 0.0, prob_snow)
+  ifelse(is.na(temp_c), NA_real_, prob_snow)
+}
+
+precip_snow_analysis <- precip_complete %>%
+  mutate(
+    dwpf      = as.numeric(ifelse(dwpf == "M" | dwpf == "" | is.na(dwpf), NA, dwpf)),
+    dewpoint_c = (dwpf - 32) * 5/9,
+    method1_is_snow  = !is.na(temp_c) & temp_c <= 0,
+    method1_snow_mm  = ifelse(method1_is_snow, p01m_corrected, 0),
+    method1_rain_mm  = ifelse(!method1_is_snow, p01m_corrected, 0),
+    method2_is_snow  = !is.na(dewpoint_c) & dewpoint_c <= 0,
+    method2_snow_mm  = ifelse(method2_is_snow, p01m_corrected, 0),
+    method2_rain_mm  = ifelse(!method2_is_snow, p01m_corrected, 0),
+    snow_probability = calc_snow_probability(temp_c),
+    method3_snow_mm  = ifelse(!is.na(snow_probability),
+                              p01m_corrected * snow_probability, 0),
+    method3_rain_mm  = ifelse(!is.na(snow_probability),
+                              p01m_corrected * (1 - snow_probability), 0),
+    cumulative_method1 = cumsum(method1_snow_mm),
+    cumulative_method2 = cumsum(method2_snow_mm),
+    cumulative_method3 = cumsum(method3_snow_mm)
+  )
+
+total_precip  <- max(precip_snow_analysis$cumulative_corrected, na.rm = TRUE)
+total_method1 <- max(precip_snow_analysis$cumulative_method1, na.rm = TRUE)
+total_method2 <- max(precip_snow_analysis$cumulative_method2, na.rm = TRUE)
+total_method3 <- max(precip_snow_analysis$cumulative_method3, na.rm = TRUE)
+
+cat("=== PRECIPITATION AS SNOW SUMMARY ===\n")
+cat(sprintf("Total precipitation (corrected): %.2f mm\n", total_precip))
+cat(sprintf("Method 1 (Air Temp 0°C): %.2f mm (%.1f%%)\n",
+            total_method1, total_method1/total_precip*100))
+cat(sprintf("Method 2 (Dewpoint 0°C): %.2f mm (%.1f%%)\n",
+            total_method2, total_method2/total_precip*100))
+cat(sprintf("Method 3 (Probability Curve): %.2f mm (%.1f%%)\n",
+            total_method3, total_method3/total_precip*100))
+
+assign_wy_month_factor <- function(date_val) {
+  m <- month(date_val)
+  factor(ifelse(m >= 10, m - 9, m + 3), levels = 1:12,
+         labels = c("Oct","Nov","Dec","Jan","Feb","Mar",
+                    "Apr","May","Jun","Jul","Aug","Sep"))
+}
+
+monthly_snow <- precip_snow_analysis %>%
+  mutate(wy_month = assign_wy_month_factor(datetime)) %>%
+  group_by(wy_month) %>%
+  summarise(
+    method1_snow = sum(method1_snow_mm, na.rm = TRUE),
+    method2_snow = sum(method2_snow_mm, na.rm = TRUE),
+    method3_snow = sum(method3_snow_mm, na.rm = TRUE),
+    total_precip = sum(p01m_corrected, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p_snow <- ggplot(precip_snow_analysis, aes(x = datetime)) +
+  geom_line(aes(y = cumulative_method1, color = "Method 1: Air Temp (0°C)"),
+            linewidth = 1.2) +
+  geom_line(aes(y = cumulative_method2, color = "Method 2: Dewpoint (0°C)"),
+            linewidth = 1.2) +
+  geom_line(aes(y = cumulative_method3, color = "Method 3: Probability Curve"),
+            linewidth = 1.2) +
+  scale_color_manual(name = "Snow Classification Method",
+    values = c("Method 1: Air Temp (0°C)" = "#d73027",
+               "Method 2: Dewpoint (0°C)" = "#4575b4",
+               "Method 3: Probability Curve" = "#fee090")) +
+  labs(title = "Cumulative Precipitation as Snow: Method Comparison (WY2024)",
+       subtitle = "Telluride ASOS — Three Classification Methods",
+       x = "Date", y = "Cumulative Snowfall (mm water equivalent)") +
+  theme_minimal() +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p_snow)
+
+temp_range_seq <- seq(-10, 10, by = 0.1)
+prob_curve_data <- data.frame(temperature = temp_range_seq,
+                              probability = calc_snow_probability(temp_range_seq))
+
+p_curve <- ggplot(prob_curve_data, aes(x = temperature, y = probability)) +
+  geom_line(color = "#4575b4", linewidth = 1.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red", alpha = 0.7) +
+  geom_vline(xintercept = TEMP_ALL_SNOW, linetype = "dotted", color = "blue") +
+  geom_vline(xintercept = TEMP_ALL_RAIN, linetype = "dotted", color = "blue") +
+  scale_y_continuous(name = "Probability of Snow", limits = c(0, 1)) +
+  labs(title = "Snow Probability Curve (Method 3)",
+       subtitle = sprintf("Logistic transition from %.1f°C to %.1f°C",
+                          TEMP_ALL_SNOW, TEMP_ALL_RAIN),
+       x = "Air Temperature (°C)") +
+  theme_minimal()
+
+print(p_curve)
+```
+
+## 4. Wind During Precipitation Events
+
+```{r}
+wind_analysis <- precip_snow_analysis %>%
+  mutate(
+    wind_ms = as.numeric(ifelse(is.na(wind_ms), NA, wind_ms)),
+    precip_condition = case_when(
+      is.na(temp_c) | is.na(p01m_corrected) ~ "Unknown",
+      p01m_corrected <= 0                   ~ "No Precipitation",
+      temp_c <= 0 & p01m_corrected > 0      ~ "Snow",
+      temp_c > 0  & p01m_corrected > 0      ~ "Rain",
+      TRUE ~ "Unknown"
+    ),
+    wy_month = assign_wy_month_factor(datetime)
+  ) %>%
+  filter(precip_condition != "Unknown")
+
+overall_wind_stats <- wind_analysis %>%
+  group_by(precip_condition) %>%
+  summarise(
+    n_obs         = n(),
+    mean_wind_ms  = mean(wind_ms, na.rm = TRUE),
+    median_wind_ms = median(wind_ms, na.rm = TRUE),
+    sd_wind_ms    = sd(wind_ms, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+cat("=== OVERALL WIND SPEED STATISTICS ===\n")
+print(overall_wind_stats %>% mutate(across(where(is.numeric), ~round(., 2))))
+
+monthly_wind_stats <- wind_analysis %>%
+  group_by(wy_month, precip_condition) %>%
+  summarise(
+    n_obs        = n(),
+    mean_wind_ms = mean(wind_ms, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p_wind <- ggplot(monthly_wind_stats,
+                 aes(x = wy_month, y = mean_wind_ms,
+                     color = precip_condition, group = precip_condition)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  scale_color_manual(name = "Precipitation Condition",
+    values = c("Rain" = "#d73027", "Snow" = "#4575b4",
+               "No Precipitation" = "#969696")) +
+  labs(title = "Monthly Average Wind Speed by Precipitation Condition (WY2024)",
+       subtitle = "Telluride ASOS",
+       x = "Water Year Month", y = "Average Wind Speed (m/s)") +
+  theme_minimal() +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p_wind)
+
+p_box <- ggplot(wind_analysis,
+                aes(x = precip_condition, y = wind_ms, fill = precip_condition)) +
+  geom_boxplot(alpha = 0.7, outlier.alpha = 0.3) +
+  scale_fill_manual(values = c("Rain"="#d73027","Snow"="#4575b4",
+                               "No Precipitation"="#969696")) +
+  labs(title = "Wind Speed Distribution by Precipitation Condition (WY2024)",
+       x = "Precipitation Condition", y = "Wind Speed (m/s)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(p_box)
+```

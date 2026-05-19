@@ -1,0 +1,17 @@
+---
+title: "Snow Hydrology — Fall 2025"
+author: "Karen Dworsky"
+---
+
+Course assignments from Snow Hydrology, Fall 2025 at Colorado State University. Analyses use Water Year 2024 data from the Telluride ASOS station (TEX) and Red Mountain Pass SNOTEL site 713.
+
+| Topic | Description |
+|-------|-------------|
+| [Climate Observations](climate-observations.qmd) | WY2024 temperature, precipitation, humidity, wind, snow depth, SWE, and snow density |
+| [Cloud Cover](cloud-cover.qmd) | Cloud cover frequency, precipitation form, and snow crystal morphology |
+| [Precipitation Analysis](precipitation-analysis.qmd) | Undercatch correction, precipitation as snow (3 methods), wind during precipitation |
+| [Albedo](albedo.qmd) | Surface albedo simulation and analysis |
+| [Snow Interception](snow-interception.qmd) | Forest canopy interception by tree species (LAI-based) |
+| [Blowing Snow](blowing-snow.qmd) | Blowing snow frequency and Pomeroy transport equation |
+| [Radiation & Energy Balance](radiation-energy-balance.qmd) | Longwave/shortwave radiation and energy balance |
+| [Snowmelt & Runoff](snowmelt-runoff.qmd) | Snowmelt factor calibration and baseflow separation |
