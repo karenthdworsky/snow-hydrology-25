@@ -24,7 +24,7 @@ wy_end   <- as.Date("2024-09-30")
 ASOS   <- read.table("data/ASOS.txt",    sep = ",", header = TRUE)
 ASOS_ST <- read.table("data/ASOS_ST.txt", sep = ",", header = TRUE)
 SNOWTEL_csv <- read.table("data/SNOWTEL.csv", sep = ",", header = TRUE)
-SNOWTEL_txt <- read.table("data/SNOWTEL.txt", sep = ",", header = TRUE)
+SNOWTEL_txt <- read.table("data/SNOWTEL.txt", sep = "\t", header = TRUE)
 ```
 
 ---
@@ -438,13 +438,7 @@ daily_snow_depth_plot
 
 ```{r}
 swe_data <- SNOWTEL_txt %>%
-  rename(
-    site_id      = `Site.Id`,
-    date         = Date,
-    time         = Time,
-    snow_depth_in = `SNWD.I.1..in.`,
-    swe_in       = `WTEQ.I.1..in.`
-  ) %>%
+  rename(site_id = 1, date = 2, snow_depth_in = 3, swe_in = 4) %>%
   mutate(
     date   = as.Date(date, format = "%m/%d/%Y"),
     swe_mm = as.numeric(swe_in) * 25.4

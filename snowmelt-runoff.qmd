@@ -24,10 +24,15 @@ M = MF × (T − T₀), where T > T₀
 Non-linear least squares estimates MF (melt factor) and T₀ (base temperature).
 
 ```{r}
-swe_data <- read.csv("data/NWIS_snowmelt.csv", stringsAsFactors = FALSE)
+swe_data <- read.csv("data/NWIS_snowmelt.csv", stringsAsFactors = FALSE,
+                     na.strings = c("NA", "", " "))
 
 swe_data <- swe_data %>%
-  mutate(datetime = mdy_hm(datetime))
+  mutate(
+    datetime   = mdy_hm(datetime),
+    temp_C     = as.numeric(temp_C),
+    change_SWE = as.numeric(change_SWE)
+  )
 
 cat("=== DATA OVERVIEW ===\n")
 cat(sprintf("Records: %d\n", nrow(swe_data)))
@@ -51,15 +56,33 @@ ggplot(swe_data, aes(x = temp_C, y = change_SWE)) +
 
 ```{r}
 swe_filtered <- swe_data %>%
-  filter(change_SWE != 0 & !is.na(temp_C) & !is.na(change_SWE) & temp_C <= 13)
+  filter(!is.na(change_SWE) & change_SWE != 0 &
+         !is.na(temp_C) & temp_C <= 13 & temp_C > 0)
 
-melt_model <- nls(change_SWE ~ MF * (temp_C - T0),
-                  data    = swe_filtered,
-                  start   = list(MF = 0.05, T0 = 5),
-                  control = nls.control(maxiter = 500))
+cat(sprintf("Observations for model fitting: %d\n", nrow(swe_filtered)))
 
-mf_estimate <- coef(melt_model)[["MF"]]
-t0_estimate <- coef(melt_model)[["T0"]]
+melt_model <- tryCatch(
+  nls(change_SWE ~ MF * (temp_C - T0),
+      data    = swe_filtered,
+      start   = list(MF = 2.0, T0 = 0),
+      control = nls.control(maxiter = 1000, minFactor = 1e-6)),
+  error = function(e) {
+    message("NLS did not converge; using linear approximation: ", e$message)
+    NULL
+  }
+)
+
+if (!is.null(melt_model)) {
+  mf_estimate <- coef(melt_model)[["MF"]]
+  t0_estimate <- coef(melt_model)[["T0"]]
+} else {
+  lm_model    <- lm(change_SWE ~ temp_C, data = swe_filtered)
+  mf_estimate <- coef(lm_model)[["temp_C"]]
+  t0_estimate <- -coef(lm_model)[["(Intercept)"]] / mf_estimate
+}
+
+mf_estimate <- as.numeric(mf_estimate)
+t0_estimate <- as.numeric(t0_estimate)
 
 cat(sprintf("Melt factor (MF): %.4f mm/°C\n", mf_estimate))
 cat(sprintf("Base temperature (T0): %.2f °C\n", t0_estimate))

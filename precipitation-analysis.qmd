@@ -36,15 +36,13 @@ estimate_snow_catch_efficiency <- function(wind_speed_ms) {
 precip_wy24 <- ASOS %>%
   mutate(
     datetime = ymd_hm(valid),
-    p01i     = as.numeric(ifelse(p01i == "M" | p01i == "" | is.na(p01i), NA, p01i)),
-    tmpf     = as.numeric(ifelse(tmpf == "M" | tmpf == "" | is.na(tmpf), NA, tmpf)),
+    p01m     = as.numeric(ifelse(p01m == "M" | p01m == "" | is.na(p01m), NA, p01m)),
+    temp_c   = as.numeric(ifelse(tmpc == "M" | tmpc == "" | is.na(tmpc), NA, tmpc)),
     sknt     = as.numeric(ifelse(sknt == "M" | sknt == "" | is.na(sknt), NA, sknt))
   ) %>%
   filter(datetime >= ymd("2023-10-01") & datetime <= ymd("2024-09-30")) %>%
   arrange(datetime) %>%
   mutate(
-    p01m   = p01i * 25.4,
-    temp_c = (tmpf - 32) * 5/9,
     wind_ms = sknt * 0.514444
   )
 
@@ -134,8 +132,7 @@ calc_snow_probability <- function(temp_c) {
 
 precip_snow_analysis <- precip_complete %>%
   mutate(
-    dwpf      = as.numeric(ifelse(dwpf == "M" | dwpf == "" | is.na(dwpf), NA, dwpf)),
-    dewpoint_c = (dwpf - 32) * 5/9,
+    dewpoint_c = as.numeric(ifelse(dwpc == "M" | dwpc == "" | is.na(dwpc), NA, dwpc)),
     method1_is_snow  = !is.na(temp_c) & temp_c <= 0,
     method1_snow_mm  = ifelse(method1_is_snow, p01m_corrected, 0),
     method1_rain_mm  = ifelse(!method1_is_snow, p01m_corrected, 0),

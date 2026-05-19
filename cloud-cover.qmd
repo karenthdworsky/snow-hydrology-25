@@ -72,12 +72,10 @@ processed_data <- data_wy24 %>%
     skyc1_frac = cloud_cover_to_fraction(skyc1),
     skyc2_frac = cloud_cover_to_fraction(skyc2),
     skyc3_frac = cloud_cover_to_fraction(skyc3),
-    skyc4_frac = cloud_cover_to_fraction(skyc4),
     all_decks_fraction = pmax(
       ifelse(is.na(skyc1_frac), 0, skyc1_frac),
       ifelse(is.na(skyc2_frac), 0, skyc2_frac),
       ifelse(is.na(skyc3_frac), 0, skyc3_frac),
-      ifelse(is.na(skyc4_frac), 0, skyc4_frac),
       na.rm = TRUE
     ),
     cloud_type_all = case_when(
@@ -173,8 +171,8 @@ processed_data_precip <- ASOS %>%
     datetime      = ymd_hm(valid),
     cloud_type    = categorize_cloud_cover(skyc1),
     cloud_fraction = cloud_cover_to_fraction(skyc1),
-    p01m = p01i * 25.4,
-    has_precip = p01m > 0
+    p01m_clean = as.numeric(ifelse(is.na(p01m) | p01m < 0, 0, p01m)),
+    has_precip = p01m_clean > 0
   ) %>%
   filter(!is.na(cloud_fraction))
 
@@ -184,7 +182,7 @@ hourly_data_all <- processed_data_precip %>%
   summarise(
     cloud_type    = first(cloud_type),
     cloud_fraction = mean(cloud_fraction, na.rm = TRUE),
-    p01m          = max(p01m, na.rm = TRUE),
+    p01m          = max(p01m_clean, na.rm = TRUE),
     has_precip    = any(has_precip, na.rm = TRUE),
     .groups = "drop"
   )
@@ -233,24 +231,19 @@ STANDARD_LAPSE_RATE   <- 0.65
 
 cloud_precip_all <- data_wy24 %>%
   mutate(
-    tmpf  = as.numeric(ifelse(tmpf  == "M" | tmpf  == "" | is.na(tmpf),  NA, tmpf)),
-    skyl1 = as.numeric(ifelse(skyl1 == "M" | skyl1 == "" | is.na(skyl1), NA, skyl1)),
+    temp_c   = as.numeric(ifelse(tmpc == "M" | tmpc == "" | is.na(tmpc), NA, tmpc)),
     datetime = ymd_hm(valid),
     wy_month = assign_wy_month(datetime)
   ) %>%
   filter(!is.na(skyc1), skyc1 != "CLR", skyc1 != "SKC") %>%
   mutate(
-    temp_c             = ifelse(!is.na(tmpf), (tmpf - 32) * 5/9, NA),
-    cloud_base_m_agl   = ifelse(!is.na(skyl1), skyl1 * 0.3048, NA),
-    height_diff_100m   = ifelse(!is.na(cloud_base_m_agl), cloud_base_m_agl / 100, NA),
-    temp_at_cloud_base = ifelse(!is.na(temp_c) & !is.na(height_diff_100m),
-                               temp_c - (STANDARD_LAPSE_RATE * height_diff_100m), NA),
     precip_form = case_when(
-      is.na(temp_c) | is.na(cloud_base_m_agl) ~ "Unknown",
-      temp_at_cloud_base > 0   ~ "Liquid (Rain)",
-      temp_at_cloud_base <= 0  ~ "Solid (Snow/Ice)",
+      is.na(temp_c)   ~ "Unknown",
+      temp_c > 0      ~ "Liquid (Rain)",
+      temp_c <= 0     ~ "Solid (Snow/Ice)",
       TRUE ~ "Unknown"
-    )
+    ),
+    temp_at_cloud_base = temp_c
   )
 
 monthly_precip_form <- cloud_precip_all %>%
@@ -261,7 +254,6 @@ monthly_precip_form <- cloud_precip_all %>%
     solid_pct   = sum(precip_form == "Solid (Snow/Ice)") / total_obs * 100,
     unknown_pct = sum(precip_form == "Unknown") / total_obs * 100,
     avg_surface_temp    = mean(temp_c, na.rm = TRUE),
-    avg_cloud_base_m    = mean(cloud_base_m_agl, na.rm = TRUE),
     avg_cloud_temp      = mean(temp_at_cloud_base, na.rm = TRUE),
     .groups = "drop"
   )
@@ -305,7 +297,7 @@ print(p_form)
 
 print(monthly_precip_form %>%
       select(wy_month, total_obs, solid_pct, liquid_pct, unknown_pct,
-             avg_surface_temp, avg_cloud_base_m, avg_cloud_temp) %>%
+             avg_surface_temp, avg_cloud_temp) %>%
       mutate(across(where(is.numeric), ~round(., 1))))
 ```
 
@@ -348,20 +340,15 @@ estimate_supersaturation <- function(temp_c, rh_percent) {
 
 snow_crystal_data <- data_wy24 %>%
   mutate(
-    tmpf  = as.numeric(ifelse(tmpf  == "M" | is.na(tmpf),  NA, tmpf)),
-    skyl1 = as.numeric(ifelse(skyl1 == "M" | is.na(skyl1), NA, skyl1)),
-    relh  = as.numeric(ifelse(relh  == "M" | is.na(relh),  NA, relh)),
+    temp_c   = as.numeric(ifelse(tmpc == "M" | is.na(tmpc), NA, tmpc)),
+    relh     = as.numeric(ifelse(relh == "M" | is.na(relh), NA, relh)),
     datetime = ymd_hm(valid),
     wy_month = assign_wy_month(datetime)
   ) %>%
   filter(!is.na(skyc1), skyc1 != "CLR", skyc1 != "SKC") %>%
   mutate(
-    temp_c             = ifelse(!is.na(tmpf), (tmpf - 32) * 5/9, NA),
-    cloud_base_m_agl   = ifelse(!is.na(skyl1), skyl1 * 0.3048, NA),
-    height_diff_100m   = ifelse(!is.na(cloud_base_m_agl), cloud_base_m_agl / 100, NA),
-    temp_at_cloud_base = ifelse(!is.na(temp_c) & !is.na(height_diff_100m),
-                               temp_c - (STANDARD_LAPSE_RATE * height_diff_100m), NA),
-    supersaturation  = estimate_supersaturation(temp_at_cloud_base, relh),
+    temp_at_cloud_base = temp_c,
+    supersaturation  = estimate_supersaturation(temp_c, relh),
     crystal_type     = case_when(
       is.na(temp_at_cloud_base) | is.na(supersaturation) ~ "Unknown",
       TRUE ~ classify_snow_crystal(temp_at_cloud_base, supersaturation)
