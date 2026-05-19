@@ -2,8 +2,12 @@
 .RData
 .Rproj.user/
 *_cache/
-*_files/
+/*_files/
+!/docs/
 *.Rproj
 
 # Large data files
 data/ASOS_ST.txt
+
+/.quarto/
+**/*.quarto_ipynb
